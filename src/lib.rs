@@ -23,7 +23,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! argon2-kdf = "1.7.4"
+//! argon2-kdf = "1.7.5"
 //! ```
 //! To pass build flags to the C compiler used to build the Argon2 library, you may add a
 //! semicolon-delimited list of flags to the `ARGON2_KDF_C_COMPILER_FLAGS` environment variable.

@@ -1,6 +1,6 @@
 [package]
 name = "argon2-kdf"
-version = "1.7.4"
+version = "1.7.5"
 rust-version = "1.85.0"
 edition = "2021"
 readme = "Readme.md"
