@@ -1,5 +1,5 @@
 use crate::error::Argon2Error;
-use crate::hasher::Algorithm;
+use crate::hasher::{Algorithm, MAX_HASH_B64_LEN, MAX_SALT_B64_LEN};
 
 use std::str::FromStr;
 
@@ -172,6 +172,9 @@ impl FromStr for TokenizedHash {
                 }
 
                 HashStates::VEquals => {
+                    if !c.is_ascii_digit() {
+                        return Err(Argon2Error::InvalidHash("Invalid version"));
+                    }
                     v = i..(i + 1);
                     state = HashStates::VValue;
                 }
@@ -180,6 +183,9 @@ impl FromStr for TokenizedHash {
                     if c == '$' {
                         state = HashStates::VComplete;
                     } else {
+                        if !c.is_ascii_digit() {
+                            return Err(Argon2Error::InvalidHash("Invalid version"));
+                        }
                         v.end += 1;
                     }
                 }
@@ -209,6 +215,9 @@ impl FromStr for TokenizedHash {
                 }
 
                 HashStates::MEquals => {
+                    if !c.is_ascii_digit() {
+                        return Err(Argon2Error::InvalidHash("Invalid m"));
+                    }
                     m = i..(i + 1);
                     state = HashStates::MValue;
                 }
@@ -219,6 +228,9 @@ impl FromStr for TokenizedHash {
                     } else if c == '$' && has_t && has_p {
                         state = HashStates::Salt;
                     } else {
+                        if !c.is_ascii_digit() {
+                            return Err(Argon2Error::InvalidHash("Invalid m"));
+                        }
                         m.end += 1;
                     }
                 }
@@ -249,6 +261,9 @@ impl FromStr for TokenizedHash {
                 }
 
                 HashStates::TEquals => {
+                    if !c.is_ascii_digit() {
+                        return Err(Argon2Error::InvalidHash("Invalid t"));
+                    }
                     t = i..(i + 1);
                     state = HashStates::TValue;
                 }
@@ -259,6 +274,9 @@ impl FromStr for TokenizedHash {
                     } else if c == '$' && has_m && has_p {
                         state = HashStates::Salt;
                     } else {
+                        if !c.is_ascii_digit() {
+                            return Err(Argon2Error::InvalidHash("Invalid t"));
+                        }
                         t.end += 1;
                     }
                 }
@@ -289,6 +307,9 @@ impl FromStr for TokenizedHash {
                 }
 
                 HashStates::PEquals => {
+                    if !c.is_ascii_digit() {
+                        return Err(Argon2Error::InvalidHash("Invalid p"));
+                    }
                     p = i..(i + 1);
                     state = HashStates::PValue;
                 }
@@ -299,6 +320,9 @@ impl FromStr for TokenizedHash {
                     } else if c == '$' && has_m && has_t {
                         state = HashStates::Salt;
                     } else {
+                        if !c.is_ascii_digit() {
+                            return Err(Argon2Error::InvalidHash("Invalid p"));
+                        }
                         p.end += 1;
                     }
                 }
@@ -321,6 +345,9 @@ impl FromStr for TokenizedHash {
                     if c == '$' {
                         state = HashStates::HashStart;
                     } else {
+                        if salt.len() + c.len_utf8() > MAX_SALT_B64_LEN {
+                            return Err(Argon2Error::InvalidHash("Salt is too long"));
+                        }
                         salt.push(c);
                     }
                 }
@@ -330,6 +357,9 @@ impl FromStr for TokenizedHash {
                         return Err(Argon2Error::InvalidHash("Missing hash after salt"));
                     }
 
+                    if s.len() - i > MAX_HASH_B64_LEN {
+                        return Err(Argon2Error::InvalidHash("Hash is too long"));
+                    }
                     hash = String::from(&s[i..]);
                     state = HashStates::Hash;
 
@@ -341,31 +371,27 @@ impl FromStr for TokenizedHash {
             }
         }
 
-        if std::mem::discriminant(&state) != std::mem::discriminant(&HashStates::Hash) {
+        if !matches!(state, HashStates::Hash) {
             return Err(Argon2Error::InvalidHash("Hash is incomplete"));
         }
 
         salt.shrink_to_fit();
 
-        let v: u32 = match s[v].parse() {
-            Ok(v) => v,
-            Err(_) => return Err(Argon2Error::InvalidHash("Invalid version")),
-        };
+        let v: u32 = s[v]
+            .parse()
+            .map_err(|_| Argon2Error::InvalidHash("Invalid version"))?;
 
-        let mem_cost_kib: u32 = match s[m].parse() {
-            Ok(m) => m,
-            Err(_) => return Err(Argon2Error::InvalidHash("Invalid m")),
-        };
+        let mem_cost_kib: u32 = s[m]
+            .parse()
+            .map_err(|_| Argon2Error::InvalidHash("Invalid m"))?;
 
-        let iterations: u32 = match s[t].parse() {
-            Ok(t) => t,
-            Err(_) => return Err(Argon2Error::InvalidHash("Invalid t")),
-        };
+        let iterations: u32 = s[t]
+            .parse()
+            .map_err(|_| Argon2Error::InvalidHash("Invalid t"))?;
 
-        let threads: u32 = match s[p].parse() {
-            Ok(p) => p,
-            Err(_) => return Err(Argon2Error::InvalidHash("Invalid p")),
-        };
+        let threads: u32 = s[p]
+            .parse()
+            .map_err(|_| Argon2Error::InvalidHash("Invalid p"))?;
 
         Ok(Self {
             v,
@@ -376,5 +402,62 @@ impl FromStr for TokenizedHash {
             b64_salt: salt,
             b64_hash: hash,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_ascii_numeric_fields_without_panicking() {
+        for (field, error) in [
+            ("v", "Invalid version"),
+            ("m", "Invalid m"),
+            ("t", "Invalid t"),
+            ("p", "Invalid p"),
+        ] {
+            for value in ["é", "1é", "💥", "1💥", "+1", ""] {
+                let params = "v=19$m=128,t=3,p=2".replace(
+                    match field {
+                        "v" => "v=19",
+                        "m" => "m=128",
+                        "t" => "t=3",
+                        _ => "p=2",
+                    },
+                    &format!("{field}={value}"),
+                );
+                let input = format!("$argon2id${params}$AQIDBAUGBwg$AQIDBAUGBwg");
+                assert!(
+                    matches!(TokenizedHash::from_str(&input), Err(Argon2Error::InvalidHash(msg)) if msg == error),
+                    "{input}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_salt_before_reaching_the_hash() {
+        // No final delimiter: rejection must occur while reading the salt.
+        let input = format!(
+            "$argon2id$v=19$m=128,t=3,p=2${}",
+            "A".repeat(MAX_SALT_B64_LEN + 1)
+        );
+        assert!(matches!(
+            TokenizedHash::from_str(&input),
+            Err(Argon2Error::InvalidHash("Salt is too long"))
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_hash_during_tokenization() {
+        let input = format!(
+            "$argon2id$v=19$m=128,t=3,p=2$AQIDBAUGBwg${}",
+            "A".repeat(MAX_HASH_B64_LEN + 1)
+        );
+        assert!(matches!(
+            TokenizedHash::from_str(&input),
+            Err(Argon2Error::InvalidHash("Hash is too long"))
+        ));
     }
 }

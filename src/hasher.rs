@@ -14,13 +14,13 @@ use crate::bindings::{
     Argon2_ErrorCodes_ARGON2_OK, Argon2_version_ARGON2_VERSION_13,
 };
 
-const MAX_VERIFY_MEMORY_COST_KIB: u32 = 4 * 1024 * 1024;
-const MAX_VERIFY_ITERATIONS: u32 = 32_768;
-const MAX_VERIFY_THREADS: u32 = 512;
-const MAX_VERIFY_SALT_LEN: usize = 1024;
-const MAX_VERIFY_HASH_LEN: usize = 4096;
-const MAX_VERIFY_SALT_B64_LEN: usize = MAX_VERIFY_SALT_LEN.div_ceil(3) * 4;
-const MAX_VERIFY_HASH_B64_LEN: usize = MAX_VERIFY_HASH_LEN.div_ceil(3) * 4;
+pub(crate) const MAX_MEMORY_COST_KIB: u32 = 4 * 1024 * 1024;
+pub(crate) const MAX_ITERATIONS: u32 = 32_768;
+pub(crate) const MAX_THREADS: u32 = 512;
+pub(crate) const MAX_SALT_LEN: usize = 1024;
+pub(crate) const MAX_HASH_LEN: usize = 4096;
+pub(crate) const MAX_SALT_B64_LEN: usize = MAX_SALT_LEN.div_ceil(3) * 4;
+pub(crate) const MAX_HASH_B64_LEN: usize = MAX_HASH_LEN.div_ceil(3) * 4;
 
 /// The Argon2 spec consist of 3 different algorithms: one that aims to be resistant to GPU
 /// cracking attacks (argon2d), one that aims to be resistant to side-channel attacks
@@ -301,30 +301,44 @@ impl<'a> Hasher<'a> {
     /// This is an expensive operation. For some appliations, it might make sense to move this
     /// operation to a separate thread using `std::thread` or something like
     /// [the Rayon crate](https://docs.rs/rayon/latest/rayon/) to avoid blocking main threads.
+    ///
+    /// Generation and verification share upper limits: 4 GiB of memory, 32,768 iterations,
+    /// 512 threads, 1,024 salt bytes, and 4,096 hash bytes. Exceeding a limit returns
+    /// [`Argon2Error::InvalidParameter`] before allocating hash or salt buffers.
     pub fn hash(self, password: &[u8]) -> Result<Hash<'_>, Argon2Error> {
-        let hash_len_usize = match usize::try_from(self.hash_len) {
-            Ok(l) => l,
-            Err(_) => return Err(Argon2Error::InvalidParameter("Hash length is too big")),
-        };
+        if self.mem_cost_kib > MAX_MEMORY_COST_KIB {
+            return Err(Argon2Error::InvalidParameter("Memory cost is too big"));
+        }
+        if self.iterations > MAX_ITERATIONS {
+            return Err(Argon2Error::InvalidParameter("Iteration count is too big"));
+        }
+        if self.threads > MAX_THREADS {
+            return Err(Argon2Error::InvalidParameter("Thread count is too big"));
+        }
+        let hash_len_usize = usize::try_from(self.hash_len)
+            .map_err(|_| Argon2Error::InvalidParameter("Hash length is too big"))?;
 
-        let mut hash_buffer = vec![0u8; hash_len_usize];
+        if hash_len_usize > MAX_HASH_LEN {
+            return Err(Argon2Error::InvalidParameter("Hash length is too big"));
+        }
 
         let (salt_len_u32, salt_len_usize) = if let Some(s) = self.custom_salt {
-            let salt_len_u32 = match u32::try_from(s.len()) {
-                Ok(l) => l,
-                Err(_) => return Err(Argon2Error::InvalidParameter("Salt length is too big")),
-            };
+            let salt_len_u32 = u32::try_from(s.len())
+                .map_err(|_| Argon2Error::InvalidParameter("Salt length is too big"))?;
 
             (salt_len_u32, s.len())
         } else {
-            let salt_len_usize = match usize::try_from(self.salt_len) {
-                Ok(l) => l,
-                Err(_) => return Err(Argon2Error::InvalidParameter("Salt length is too big")),
-            };
+            let salt_len_usize = usize::try_from(self.salt_len)
+                .map_err(|_| Argon2Error::InvalidParameter("Salt length is too big"))?;
 
             (self.salt_len, salt_len_usize)
         };
 
+        if salt_len_usize > MAX_SALT_LEN {
+            return Err(Argon2Error::InvalidParameter("Salt length is too big"));
+        }
+
+        let mut hash_buffer = vec![0u8; hash_len_usize];
         let mut salt = if let Some(s) = self.custom_salt {
             Vec::from(s)
         } else {
@@ -337,10 +351,10 @@ impl<'a> Hasher<'a> {
 
         let (secret_ptr, secret_len) = {
             if let Some(s) = self.secret {
-                let length = match s.0.len().try_into() {
-                    Ok(l) => l,
-                    Err(_) => return Err(Argon2Error::InvalidParameter("Secret is too long")),
-                };
+                let length =
+                    s.0.len()
+                        .try_into()
+                        .map_err(|_| Argon2Error::InvalidParameter("Secret is too long"))?;
 
                 (s.0.as_ptr() as *mut _, length)
             } else {
@@ -354,10 +368,10 @@ impl<'a> Hasher<'a> {
             out: hash_buffer.as_mut_ptr(),
             outlen: self.hash_len,
             pwd: password as *const _ as *mut _,
-            pwdlen: match password.len().try_into() {
-                Ok(l) => l,
-                Err(_) => return Err(Argon2Error::InvalidParameter("Password is too long")),
-            },
+            pwdlen: password
+                .len()
+                .try_into()
+                .map_err(|_| Argon2Error::InvalidParameter("Password is too long"))?,
             salt: salt.as_mut_ptr(),
             saltlen: salt_len_u32,
             secret: secret_ptr,
@@ -425,8 +439,7 @@ impl fmt::Debug for Hash<'_> {
     }
 }
 
-#[allow(clippy::to_string_trait_impl)]
-impl ToString for Hash<'_> {
+impl fmt::Display for Hash<'_> {
     /// Generates a hash string. Aside from the hash, the hash string also includes the salt
     /// and paramters used to generate the hash, making it easy to store in a database or a
     /// cache. This string is formatted to a standard shared by most implementations of argon2,
@@ -435,7 +448,7 @@ impl ToString for Hash<'_> {
     /// A hash string looks something like this:
     ///
     /// _$argon2id$v=19$m=62500,t=18,p=2$AQIDBAUGBwg$ypJ3pKxN4aWGkwMv0TOb08OIzwrfK1SZWy64vyTLKo8_
-    fn to_string(&self) -> String {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b64_salt = b64_stdnopad.encode(self.salt.as_ref());
         let b64_hash = b64_stdnopad.encode(self.hash.as_ref());
 
@@ -445,7 +458,8 @@ impl ToString for Hash<'_> {
             Algorithm::Argon2id => "id",
         };
 
-        format!(
+        write!(
+            f,
             "$argon2{}$v={}$m={},t={},p={}${}${}",
             alg,
             Argon2_version_ARGON2_VERSION_13,
@@ -474,37 +488,27 @@ impl FromStr for Hash<'_> {
             return Err(Argon2Error::InvalidHash("Hash version is unsupported"));
         }
 
-        if tokenized_hash.b64_salt.len() > MAX_VERIFY_SALT_B64_LEN {
+        if tokenized_hash.b64_salt.len() > MAX_SALT_B64_LEN {
             return Err(Argon2Error::InvalidHash("Salt is too long"));
         }
 
-        if tokenized_hash.b64_hash.len() > MAX_VERIFY_HASH_B64_LEN {
+        if tokenized_hash.b64_hash.len() > MAX_HASH_B64_LEN {
             return Err(Argon2Error::InvalidHash("Hash is too long"));
         }
 
-        let decoded_salt = match b64_stdnopad.decode(tokenized_hash.b64_salt) {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(Argon2Error::InvalidHash(
-                    "Invalid character in base64-encoded salt",
-                ))
-            }
-        };
+        let decoded_salt = b64_stdnopad
+            .decode(tokenized_hash.b64_salt)
+            .map_err(|_| Argon2Error::InvalidHash("Invalid character in base64-encoded salt"))?;
 
-        if decoded_salt.len() > MAX_VERIFY_SALT_LEN {
+        if decoded_salt.len() > MAX_SALT_LEN {
             return Err(Argon2Error::InvalidHash("Salt is too long"));
         }
 
-        let decoded_hash = match b64_stdnopad.decode(tokenized_hash.b64_hash) {
-            Ok(h) => h,
-            Err(_) => {
-                return Err(Argon2Error::InvalidHash(
-                    "Invalid character in base64-encoded hash",
-                ))
-            }
-        };
+        let decoded_hash = b64_stdnopad
+            .decode(tokenized_hash.b64_hash)
+            .map_err(|_| Argon2Error::InvalidHash("Invalid character in base64-encoded hash"))?;
 
-        if decoded_hash.len() > MAX_VERIFY_HASH_LEN {
+        if decoded_hash.len() > MAX_HASH_LEN {
             return Err(Argon2Error::InvalidHash("Hash is too long"));
         }
 
@@ -615,9 +619,8 @@ impl<'a> Hash<'a> {
             return false;
         }
 
-        let hash_length: u32 = match self.hash.len().try_into() {
-            Ok(l) => l,
-            Err(_) => return false,
+        let Ok(hash_length) = u32::try_from(self.hash.len()) else {
+            return false;
         };
 
         let mut hash_builder = Hasher::default()
@@ -632,9 +635,8 @@ impl<'a> Hash<'a> {
             hash_builder = hash_builder.secret(s);
         }
 
-        let hashed_password = match hash_builder.hash(password) {
-            Ok(h) => h,
-            Err(_) => return false,
+        let Ok(hashed_password) = hash_builder.hash(password) else {
+            return false;
         };
 
         let mut hashes_dont_match = 0u8;
@@ -653,11 +655,11 @@ impl<'a> Hash<'a> {
     }
 
     fn is_within_verify_limits(&self) -> bool {
-        self.mem_cost_kib <= MAX_VERIFY_MEMORY_COST_KIB
-            && self.iterations <= MAX_VERIFY_ITERATIONS
-            && self.threads <= MAX_VERIFY_THREADS
-            && self.salt.len() <= MAX_VERIFY_SALT_LEN
-            && self.hash.len() <= MAX_VERIFY_HASH_LEN
+        self.mem_cost_kib <= MAX_MEMORY_COST_KIB
+            && self.iterations <= MAX_ITERATIONS
+            && self.threads <= MAX_THREADS
+            && self.salt.len() <= MAX_SALT_LEN
+            && self.hash.len() <= MAX_HASH_LEN
     }
 }
 
@@ -1019,8 +1021,8 @@ mod tests {
 
     #[test]
     fn test_from_str_rejects_oversized_encoded_parts() {
-        let oversized_salt = "A".repeat(MAX_VERIFY_SALT_B64_LEN + 1);
-        let oversized_hash = "A".repeat(MAX_VERIFY_HASH_B64_LEN + 1);
+        let oversized_salt = "A".repeat(MAX_SALT_B64_LEN + 1);
+        let oversized_hash = "A".repeat(MAX_HASH_B64_LEN + 1);
 
         let hash = Hash::from_str(&format!(
             "$argon2id$v=19$m=128,t=3,p=2${oversized_salt}$AQIDBAUGBwg"
@@ -1034,12 +1036,68 @@ mod tests {
     }
 
     #[test]
+    fn generation_rejects_parameters_above_verification_limits() {
+        let oversized_salt = vec![0; MAX_SALT_LEN + 1];
+        let base = Hasher::new().memory_cost_kib(16).iterations(1).threads(1);
+        let cases = [
+            (
+                base.clone().memory_cost_kib(MAX_MEMORY_COST_KIB + 1),
+                "Memory cost is too big",
+            ),
+            (
+                base.clone().iterations(MAX_ITERATIONS + 1),
+                "Iteration count is too big",
+            ),
+            (
+                base.clone().threads(MAX_THREADS + 1),
+                "Thread count is too big",
+            ),
+            (
+                base.clone().hash_length(MAX_HASH_LEN as u32 + 1),
+                "Hash length is too big",
+            ),
+            (base.clone().hash_length(u32::MAX), "Hash length is too big"),
+            (
+                base.clone().salt_length(MAX_SALT_LEN as u32 + 1),
+                "Salt length is too big",
+            ),
+            (base.clone().salt_length(u32::MAX), "Salt length is too big"),
+            (base.custom_salt(&oversized_salt), "Salt length is too big"),
+        ];
+        for (hasher, error) in cases {
+            assert!(
+                matches!(hasher.hash(b"password"), Err(Argon2Error::InvalidParameter(msg)) if msg == error)
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_hash_and_salt_lengths_round_trip_and_verify() {
+        let salt = vec![0; MAX_SALT_LEN];
+        let hash = Hasher::new()
+            .custom_salt(&salt)
+            // An explicit salt overrides the requested random salt length.
+            .salt_length(u32::MAX)
+            .hash_length(MAX_HASH_LEN as u32)
+            .memory_cost_kib(16)
+            .iterations(1)
+            .threads(1)
+            .hash(b"password")
+            .unwrap();
+        assert!(hash.verify(b"password"));
+        let parsed = Hash::from_str(&hash.to_string()).unwrap();
+        assert_eq!(parsed.as_bytes(), hash.as_bytes());
+        assert_eq!(parsed.salt_bytes(), hash.salt_bytes());
+        assert!(parsed.verify(b"password"));
+    }
+
+    #[test]
     fn test_verify_rejects_excessive_resource_params() {
         let hash_bytes = [0u8; 32];
         let salt = b"seasalts";
         let excessive_memory_hash_string = format!(
             "$argon2id$v=19$m={},t=1,p=1$AQIDBAUGBwg$7OU7S/azjYpnXXySR52cFWeisxk1VVjNeXqtQ8ZM/Oc",
-            MAX_VERIFY_MEMORY_COST_KIB + 1
+            MAX_MEMORY_COST_KIB + 1
         );
 
         let excessive_memory_from_str = Hash::from_str(&excessive_memory_hash_string).unwrap();
@@ -1049,7 +1107,7 @@ mod tests {
             &hash_bytes,
             salt,
             Algorithm::Argon2id,
-            MAX_VERIFY_MEMORY_COST_KIB + 1,
+            MAX_MEMORY_COST_KIB + 1,
             1,
             1,
         );
@@ -1060,7 +1118,7 @@ mod tests {
             salt,
             Algorithm::Argon2id,
             16,
-            MAX_VERIFY_ITERATIONS + 1,
+            MAX_ITERATIONS + 1,
             1,
         );
         assert!(!excessive_iterations.verify(b"password"));
@@ -1071,7 +1129,7 @@ mod tests {
             Algorithm::Argon2id,
             16,
             1,
-            MAX_VERIFY_THREADS + 1,
+            MAX_THREADS + 1,
         );
         assert!(!excessive_threads.verify(b"password"));
     }
