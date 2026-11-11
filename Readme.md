@@ -23,7 +23,7 @@ To use argon2-kdf, add the following to your Cargo.toml:
 
 ```toml
 [dependencies]
-argon2-kdf = "1.7.3"
+argon2-kdf = "1.7.4"
 ```
 
 To pass build flags to the C compiler used to build the Argon2 library, you may add a semicolon-delimited list of flags to the `ARGON2_KDF_C_COMPILER_FLAGS` environment variable. For example, `ARGON2_KDF_C_COMPILER_FLAGS="-mno-avx512f;-mno-avx2" cargo build`. It is recommended to enable CPU-specific optimizations for your CPU with `ARGON2_KDF_C_COMPILER_FLAGS="-march=native"` or by adding this to `.cargo/config.toml` in your project:
